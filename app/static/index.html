@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FedIris gRPC — Aprendizagem Federada</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 28 28" width="24" height="24" fill="none">
+            <circle cx="14" cy="14" r="4.5" fill="currentColor" />
+            <circle cx="14" cy="4" r="2.2" fill="currentColor" opacity="0.7" />
+            <circle cx="23" cy="9.5" r="2.2" fill="currentColor" opacity="0.7" />
+            <circle cx="23" cy="18.5" r="2.2" fill="currentColor" opacity="0.7" />
+            <circle cx="14" cy="24" r="2.2" fill="currentColor" opacity="0.7" />
+            <circle cx="5" cy="18.5" r="2.2" fill="currentColor" opacity="0.7" />
+            <circle cx="5" cy="9.5" r="2.2" fill="currentColor" opacity="0.7" />
+            <path d="M14 6.2V9.5M21 10.6L18 12.2M21 17.4L18 15.8M14 21.8V18.5M7 17.4L10 15.8M7 10.6L10 12.2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" opacity="0.6" />
+          </svg>
+        </div>
+        <div>
+          <h1>FedIris gRPC</h1>
+          <p class="subtitle">Aprendizagem Federada Distribuída • Iris + LogisticRegression + FedAvg</p>
+        </div>
+      </div>
+
+      <div class="header-status">
+        <span id="endpoint-badge" class="pill pill-neutral mono">gRPC: inativo</span>
+        <span id="status-badge" class="pill pill-neutral">Ocioso</span>
+      </div>
+    </div>
+
+    <nav class="tabs" role="tablist" aria-label="Seções do painel">
+      <button class="tab active" data-tab="overview" role="tab" aria-selected="true">Visão Geral &amp; Topologia</button>
+      <button class="tab" data-tab="clients" role="tab" aria-selected="false">Clientes, Partições &amp; Pesos</button>
+      <button class="tab" data-tab="protocol" role="tab" aria-selected="false">Protocolo gRPC &amp; Validações</button>
+      <button class="tab" data-tab="inference" role="tab" aria-selected="false">Testar Modelo (Iris)</button>
+      <button class="tab" data-tab="tests" role="tab" aria-selected="false">Testes Unitários</button>
+    </nav>
+  </header>
+
+  <main class="container">
+    <div id="toast-banner" class="toast hidden" role="status" aria-live="polite"></div>
+
+    <!-- ============================================================ -->
+    <!-- TAB 1: VISÃO GERAL & TOPOLOGIA                                -->
+    <!-- ============================================================ -->
+    <section id="tab-overview" class="tab-panel active">
+      <!-- Barra de controle -->
+      <div class="card control-card">
+        <div class="control-grid">
+          <label class="field">
+            <span>Clientes (N)</span>
+            <input id="cfg-clients" type="number" min="2" max="10" value="5" />
+          </label>
+          <label class="field">
+            <span>Rodadas (R)</span>
+            <input id="cfg-rounds" type="number" min="1" max="25" value="10" />
+          </label>
+          <label class="field">
+            <span>Épocas locais</span>
+            <input id="cfg-epochs" type="number" min="1" max="10" value="1" />
+          </label>
+          <label class="field">
+            <span>Delay visual (s)</span>
+            <input id="cfg-delay" type="number" min="0" max="3" step="0.05" value="0.40" />
+          </label>
+          <label class="field field-checkbox">
+            <input id="cfg-step-mode" type="checkbox" />
+            <span>Modo passo a passo</span>
+          </label>
+        </div>
+
+        <div class="control-actions">
+          <button id="btn-start" class="btn btn-primary">Iniciar Sessão gRPC</button>
+          <button id="btn-next-round" class="btn btn-accent hidden">Avançar 1 Rodada</button>
+          <button id="btn-stop" class="btn btn-danger-outline" disabled>Parar</button>
+          <button id="btn-baseline" class="btn btn-secondary">Comparar Baseline Manual</button>
+        </div>
+      </div>
+
+      <!-- Pipeline das 5 etapas do PDF -->
+      <div class="card stage-card">
+        <div class="stage-header">
+          <span class="section-eyebrow">Ciclo de Aprendizagem Federada (Etapas do Trabalho)</span>
+          <span id="stage-caption" class="muted-text">Pronto para iniciar a federação</span>
+        </div>
+        <ol class="stages" id="stages-list">
+          <li data-stage="0"><span class="stage-num">0</span><span>Inicializar Global</span></li>
+          <li data-stage="1"><span class="stage-num">1</span><span>Enviar Modelo (GetGlobalModel)</span></li>
+          <li data-stage="2"><span class="stage-num">2</span><span>Treino Local</span></li>
+          <li data-stage="3"><span class="stage-num">3</span><span>Retornar Update (SubmitUpdate)</span></li>
+          <li data-stage="4"><span class="stage-num">4</span><span>Agregar FedAvg</span></li>
+          <li data-stage="5"><span class="stage-num">5</span><span>Convergência</span></li>
+        </ol>
+      </div>
+
+      <!-- KPIs -->
+      <div class="kpi-grid">
+        <div class="card kpi-card">
+          <div class="kpi-label">Rodada Federada</div>
+          <div class="kpi-value mono" id="kpi-round">0 / 10</div>
+          <div class="progress-track"><div class="progress-fill" id="kpi-round-bar" style="width: 0%"></div></div>
+          <div class="kpi-sub" id="kpi-elapsed">Tempo: —</div>
+        </div>
+
+        <div class="card kpi-card">
+          <div class="kpi-label">Acurácia Global (Teste)</div>
+          <div class="kpi-value mono accent-emerald" id="kpi-acc">—</div>
+          <div class="kpi-sub" id="kpi-acc-sub">Treino médio local: —</div>
+        </div>
+
+        <div class="card kpi-card">
+          <div class="kpi-label">Log-Loss Global (Teste)</div>
+          <div class="kpi-value mono accent-blue" id="kpi-loss">—</div>
+          <div class="kpi-sub" id="kpi-loss-sub">Treino médio local: —</div>
+        </div>
+
+        <div class="card kpi-card">
+          <div class="kpi-label">Tráfego gRPC / Protobuf</div>
+          <div class="kpi-value mono" id="kpi-rpcs">0 RPCs</div>
+          <div class="kpi-sub" id="kpi-rpcs-sub">0 B trafegados • 0 recusados</div>
+        </div>
+      </div>
+
+      <!-- Topologia + Gráficos -->
+      <div class="overview-grid">
+        <div class="card topology-card">
+          <div class="card-head">
+            <div>
+              <h2>Topologia gRPC em Tempo Real</h2>
+              <p class="card-sub">Servidor central agregando atualizações dos clientes sobre canais gRPC reais</p>
+            </div>
+            <div class="legend-inline">
+              <span><i class="dot dot-blue"></i>GetGlobalModel</span>
+              <span><i class="dot dot-amber"></i>Treinando</span>
+              <span><i class="dot dot-emerald"></i>SubmitUpdate OK</span>
+              <span><i class="dot dot-red"></i>Recusado</span>
+            </div>
+          </div>
+          <div class="topology-wrap">
+            <svg id="topology-svg" viewBox="0 0 640 420" role="img" aria-label="Diagrama da topologia gRPC"></svg>
+          </div>
+        </div>
+
+        <div class="charts-stack">
+          <div class="card chart-card">
+            <div class="card-head">
+              <div>
+                <h2>Acurácia por Rodada</h2>
+                <p class="card-sub">Evolução do modelo global agregado vs. média local</p>
+              </div>
+              <div class="legend-inline">
+                <span><i class="line-swatch swatch-blue"></i>Global Teste</span>
+                <span><i class="line-swatch swatch-emerald"></i>Média Local</span>
+                <span><i class="line-swatch swatch-amber dashed"></i>Manual</span>
+              </div>
+            </div>
+            <svg id="chart-acc" class="chart-svg" viewBox="0 0 520 190"></svg>
+          </div>
+
+          <div class="card chart-card">
+            <div class="card-head">
+              <div>
+                <h2>Log-Loss por Rodada</h2>
+                <p class="card-sub">Redução da função de perda durante o FedAvg</p>
+              </div>
+              <div class="legend-inline">
+                <span><i class="line-swatch swatch-blue"></i>Global Teste</span>
+                <span><i class="line-swatch swatch-emerald"></i>Média Local</span>
+                <span><i class="line-swatch swatch-amber dashed"></i>Manual</span>
+              </div>
+            </div>
+            <svg id="chart-loss" class="chart-svg" viewBox="0 0 520 190"></svg>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tabela de histórico de rodadas -->
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <h2>Histórico Consolidado por Rodada</h2>
+            <p class="card-sub">Comparativo entre métricas médias locais, avaliação global e baseline manual</p>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Rodada</th>
+                <th>Loss Local (Média)</th>
+                <th>Acc Local (Média)</th>
+                <th>Loss Global (Teste)</th>
+                <th>Acc Global (Teste)</th>
+                <th>Baseline Manual (Acc)</th>
+              </tr>
+            </thead>
+            <tbody id="rounds-table-body">
+              <tr><td colspan="6" class="empty-cell">Inicie uma sessão gRPC para acompanhar a convergência rodada a rodada.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================================================ -->
+    <!-- TAB 2: CLIENTES, PARTIÇÕES & PESOS                            -->
+    <!-- ============================================================ -->
+    <section id="tab-clients" class="tab-panel">
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <h2>Partições IID por Cliente &amp; Contribuição FedAvg</h2>
+            <p class="card-sub">Os dados brutos permanecem em cada cliente (80% treino / 20% teste); apenas parâmetros são enviados</p>
+          </div>
+          <div class="legend-inline">
+            <span><i class="dot dot-setosa"></i>Setosa</span>
+            <span><i class="dot dot-versicolor"></i>Versicolor</span>
+            <span><i class="dot dot-virginica"></i>Virginica</span>
+          </div>
+        </div>
+        <div id="clients-grid" class="clients-grid">
+          <div class="empty-state">Inicie uma sessão gRPC para visualizar as partições locais dos clientes.</div>
+        </div>
+      </div>
+
+      <div class="two-col-grid">
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <h2>Parâmetros do Modelo Global (<code class="mono">coef_</code> e <code class="mono">intercept_</code>)</h2>
+              <p class="card-sub">Inspecione a evolução dos pesos da regressão logística ao longo das rodadas</p>
+            </div>
+            <div class="scrubber-box">
+              <label for="weights-round-slider" class="mono">Rodada: <strong id="weights-round-label">0</strong></label>
+              <input id="weights-round-slider" type="range" min="0" max="0" value="0" />
+            </div>
+          </div>
+          <div id="weights-meta" class="meta-strip mono"></div>
+          <div id="weights-heatmap" class="heatmap-wrap">
+            <div class="empty-state">Nenhum parâmetro carregado ainda.</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <h2>Matriz de Confusão Global</h2>
+              <p class="card-sub">Avaliação do modelo agregado mais recente sobre a união dos conjuntos de teste locais</p>
+            </div>
+          </div>
+          <div id="confusion-wrap" class="confusion-wrap">
+            <div class="empty-state">Execute uma sessão gRPC para gerar a matriz de confusão.</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================================================ -->
+    <!-- TAB 3: PROTOCOLO gRPC & VALIDAÇÕES                            -->
+    <!-- ============================================================ -->
+    <section id="tab-protocol" class="tab-panel">
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <h2>Laboratório de Validações do Servidor (<code class="mono">_validate_update</code>)</h2>
+            <p class="card-sub">Dispare chamadas <code class="mono">SubmitUpdate</code> reais via gRPC contra o servidor ativo para testar as regras de segurança da rodada</p>
+          </div>
+        </div>
+        <div class="fault-buttons">
+          <button class="btn btn-secondary" data-inject="stale_round">Simular Rodada Inválida (round=99)</button>
+          <button class="btn btn-secondary" data-inject="duplicate">Simular Update Duplicado (cid=0)</button>
+          <button class="btn btn-secondary" data-inject="after_finish">Simular Update Pós-Encerramento</button>
+        </div>
+        <div id="inject-result" class="inject-result hidden"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <h2>Fluxo de Chamadas RPC em Tempo Real</h2>
+            <p class="card-sub">Todas as trocas Protobuf (<code class="mono">GetGlobalModel</code> e <code class="mono">SubmitUpdate</code>) capturadas no servidor</p>
+          </div>
+          <div class="filter-group" id="rpc-filters">
+            <button class="chip active" data-filter="all">Todos</button>
+            <button class="chip" data-filter="GetGlobalModel">GetGlobalModel</button>
+            <button class="chip" data-filter="SubmitUpdate">SubmitUpdate</button>
+            <button class="chip" data-filter="rejected">Recusados</button>
+          </div>
+        </div>
+        <div class="table-wrap table-scroll">
+          <table class="data-table mono-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Hora</th>
+                <th>Método RPC</th>
+                <th>Cliente</th>
+                <th>Rodada</th>
+                <th>Payload (Req / Resp)</th>
+                <th>Latência</th>
+                <th>Status</th>
+                <th>Mensagem</th>
+              </tr>
+            </thead>
+            <tbody id="rpc-table-body">
+              <tr><td colspan="9" class="empty-cell">Nenhuma chamada gRPC registrada ainda.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================================================ -->
+    <!-- TAB 4: TESTAR MODELO (IRIS)                                   -->
+    <!-- ============================================================ -->
+    <section id="tab-inference" class="tab-panel">
+      <div class="two-col-grid">
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <h2>Medidas da Flor Iris</h2>
+              <p class="card-sub">Ajuste os 4 atributos usados pelo modelo e veja a predição ao vivo</p>
+            </div>
+          </div>
+
+          <div class="presets-bar">
+            <button class="chip" data-preset="setosa">Preset Setosa</button>
+            <button class="chip" data-preset="versicolor">Preset Versicolor</button>
+            <button class="chip" data-preset="virginica">Preset Virginica</button>
+          </div>
+
+          <div class="slider-list">
+            <div class="slider-item">
+              <div class="slider-top">
+                <label for="in-pl">petal_length (Comprimento da Pétala)</label>
+                <span class="mono" id="val-pl">1.4 cm</span>
+              </div>
+              <input id="in-pl" type="range" min="1.0" max="7.0" step="0.1" value="1.4" />
+            </div>
+
+            <div class="slider-item">
+              <div class="slider-top">
+                <label for="in-pw">petal_width (Largura da Pétala)</label>
+                <span class="mono" id="val-pw">0.2 cm</span>
+              </div>
+              <input id="in-pw" type="range" min="0.1" max="2.5" step="0.1" value="0.2" />
+            </div>
+
+            <div class="slider-item">
+              <div class="slider-top">
+                <label for="in-sl">sepal_length (Comprimento da Sépala)</label>
+                <span class="mono" id="val-sl">5.1 cm</span>
+              </div>
+              <input id="in-sl" type="range" min="4.3" max="8.0" step="0.1" value="5.1" />
+            </div>
+
+            <div class="slider-item">
+              <div class="slider-top">
+                <label for="in-sw">sepal_width (Largura da Sépala)</label>
+                <span class="mono" id="val-sw">3.5 cm</span>
+              </div>
+              <input id="in-sw" type="range" min="2.0" max="4.5" step="0.1" value="3.5" />
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <h2>Predição do Modelo Global Atual</h2>
+              <p class="card-sub" id="predict-model-note">Avaliando com o estado atual dos pesos globais</p>
+            </div>
+          </div>
+          <div id="predict-output" class="predict-output">
+            <div class="predict-hero">
+              <span class="predict-eyebrow">Espécie Prevista</span>
+              <strong id="predict-class">—</strong>
+              <span id="predict-confidence" class="pill pill-emerald mono">—</span>
+            </div>
+            <div id="predict-bars" class="prob-bars"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================================================ -->
+    <!-- TAB 5: TESTES UNITÁRIOS                                       -->
+    <!-- ============================================================ -->
+    <section id="tab-tests" class="tab-panel">
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <h2>Suíte de Testes Unitários (<code class="mono">start/tests/</code>)</h2>
+            <p class="card-sub">Executa os 5 módulos oficiais do trabalho na ordem pedagógica recomendada pelo README</p>
+          </div>
+          <button id="btn-run-tests" class="btn btn-primary">Executar Todos os Testes</button>
+        </div>
+        <div id="tests-summary" class="tests-summary hidden"></div>
+        <div id="tests-list" class="tests-list">
+          <div class="empty-state">Clique em “Executar Todos os Testes” para validar cliente, servidor, serialização Protobuf e agregação FedAvg.</div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

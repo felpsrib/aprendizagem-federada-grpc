@@ -1,0 +1,27 @@
+[project]
+name = "trabalho1-aprendizagem-federada"
+version = "0.2.0"
+description = "Simulação e sistema distribuído gRPC de Aprendizagem Federada (Iris + FedAvg) com interface web interativa."
+requires-python = ">=3.9"
+dependencies = [
+    "flwr-datasets>=0.5.0",
+    "numpy>=2.0.2",
+    "pandas>=2.3.3",
+    "scikit-learn>=1.6.1",
+    "grpcio>=1.68.0",
+    "grpcio-tools>=1.68.0",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.32.0",
+]
+
+[tool.pyright]
+venvPath = "."
+venv = ".venv"
+extraPaths = ["start"]
+exclude = [".venv", "**/__pycache__"]
+
+[tool.basedpyright]
+venvPath = "."
+venv = ".venv"
+extraPaths = ["start"]
+exclude = [".venv", "**/__pycache__"]
