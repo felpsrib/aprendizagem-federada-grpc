@@ -46,38 +46,43 @@ $$w^{(t+1)} = \sum_{k=1}^{K} \frac{n_k}{n} \, w_k^{(t+1)}, \qquad n = \sum_{k=1}
 O sistema foi organizado em camadas desacopladas para manter **100% de compatibilidade** com a estrutura e os testes unitários exigidos na disciplina (`start/`), adicionando observabilidade em tempo real, segurança de portas e painel web interativo (`app/` + `run_ui.py`):
 
 ```mermaid
-flowchart TB
-    subgraph ClientLayer["Camada de Clientes Distribuídos (start/student_fl_client_grpc.py)"]
-        direction LR
-        C0["Cliente 0\nPartição IID local\n(80% treino / 20% teste)"]
-        C1["Cliente 1\nPartição IID local\n(80% treino / 20% teste)"]
-        CN["Cliente N-1\nPartição IID local\n(80% treino / 20% teste)"]
+flowchart LR
+    subgraph Clients["Nós Clientes (start/)"]
+        direction TB
+        C0["Cliente 0\nIris IID • Treino Local"]
+        C1["Cliente 1\nIris IID • Treino Local"]
+        CN["Cliente N-1\nIris IID • Treino Local"]
     end
 
-    subgraph GrpcCore["Núcleo Coordenador gRPC (start/student_fl_server_grpc.py + common_fl.py)"]
-        SRV["FederatedLearningServicer\n• GetGlobalModel(ClientHello) → GlobalModel\n• SubmitUpdate(ClientUpdate) → UpdateAck\n• _validate_update (rodada, duplicata, término)\n• _consolidate_round_if_ready (FedAvg + Avaliação)"]
-        PROTO["Contrato Protobuf (federated.proto)\nModelParameters • GlobalModel • ClientUpdate • UpdateAck"]
-        SRV --- PROTO
+    subgraph Core["Núcleo Coordenador gRPC (start/)"]
+        direction TB
+        SRV["FederatedLearningServicer\nValidação • FedAvg • Avaliação"]
+        ML[("common_fl.py\nIris • LogisticRegression")]
+        SRV --- ML
     end
 
-    subgraph AppLayer["Camada de Orquestração, Rede Segura & API (app/)"]
-        ORC["ObservableFederatedLearningServicer\n& FederatedOrchestrator\n(telemetria, baseline manual, inferência, testes)"]
-        NET["net_utils.py\nBind exclusivo IPv4/IPv6\nSO_EXCLUSIVEADDRUSE • grpc.so_reuseport=0"]
-        API["FastAPI (app/server.py)\nREST (/api/*) • SSE (/api/events) • /api/health"]
+    subgraph App["Orquestração & API (app/)"]
+        direction TB
+        ORC["FederatedOrchestrator\nTelemetria • Baseline • Testes"]
+        API["FastAPI + net_utils\nREST • SSE • Bind Exclusivo"]
         ORC <--> API
-        NET -.-> ORC
-        NET -.-> API
     end
 
-    subgraph Frontend["Painel Web Autocontido (app/static/ + run_ui.py)"]
-        UI["FedIris gRPC Dashboard\nTopologia SVG • Gráficos • Heatmap • Validações • Inferência • Testes"]
-    end
+    UI["Painel FedIris gRPC\nHTML/CSS/JS • Topologia SVG"]
 
-    C0 <-->|"gRPC / HTTP2 (Protobuf)"| SRV
-    C1 <-->|"gRPC / HTTP2 (Protobuf)"| SRV
-    CN <-->|"gRPC / HTTP2 (Protobuf)"| SRV
-    SRV -.->|"Herança + eventos em tempo real"| ORC
-    API <-->|"HTTP + Server-Sent Events"| UI
+    Clients <-->|"gRPC / Protobuf"| SRV
+    SRV -.->|"Telemetria"| ORC
+    API <-->|"HTTP / SSE"| UI
+
+    classDef client fill:#1e3a5f,stroke:#60a5fa,color:#f8fafc,stroke-width:1.5px
+    classDef core fill:#064e3b,stroke:#34d399,color:#f8fafc,stroke-width:1.5px
+    classDef app fill:#3b0764,stroke:#c084fc,color:#f8fafc,stroke-width:1.5px
+    classDef ui fill:#78350f,stroke:#fbbf24,color:#f8fafc,stroke-width:1.5px
+
+    class C0,C1,CN client
+    class SRV,ML core
+    class ORC,API app
+    class UI ui
 ```
 
 ### Fluxo de Comunicação gRPC por Rodada
