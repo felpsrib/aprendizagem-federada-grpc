@@ -6,7 +6,7 @@
 ![scikit-learn](https://img.shields.io/badge/scikit--learn-LogisticRegression-F7931E?logo=scikitlearn&logoColor=white)
 ![Tests](https://img.shields.io/badge/Unit%20Tests-15%2F15%20Passing-059669)
 
-Sistema distribuído de **Aprendizagem Federada (*Federated Learning*)** utilizando **gRPC**, **Protocol Buffers** e o algoritmo **FedAvg (*Federated Averaging*)** aplicado à classificação multiclasse do dataset clássico **Iris**, acompanhado de uma **interface web interativa** para visualização em tempo real da topologia distribuída, métricas de convergência, pesos do modelo e validação de protocolo.
+Sistema distribuído de **Aprendizagem Federada (*Federated Learning*)** utilizando **gRPC**, **Protocol Buffers** e o algoritmo **FedAvg (*Federated Averaging*)** aplicado à classificação multiclasse do dataset clássico **Iris**, acompanhado de uma **interface web interativa** para visualização em tempo real da topologia distribuída, métricas de convergência, evolução de pesos, validações de protocolo e execução da suíte de testes unitários.
 
 ---
 
@@ -43,32 +43,78 @@ $$w^{(t+1)} = \sum_{k=1}^{K} \frac{n_k}{n} \, w_k^{(t+1)}, \qquad n = \sum_{k=1}
 
 ## Arquitetura do Sistema
 
-O projeto foi organizado em duas camadas desacopladas para preservar **100% de compatibilidade** com a estrutura e a suíte oficial de testes do trabalho (`start/`), ao mesmo tempo em que oferece observabilidade e controle interativo (`app/`):
+O sistema foi organizado em camadas desacopladas para manter **100% de compatibilidade** com a estrutura e os testes unitários exigidos na disciplina (`start/`), adicionando observabilidade em tempo real, segurança de portas e painel web interativo (`app/` + `run_ui.py`):
 
 ```mermaid
-flowchart LR
-    subgraph Clients["Nós Clientes gRPC (start/student_fl_client_grpc.py)"]
-        C0["Cliente 0\nPartição IID local"]
-        C1["Cliente 1\nPartição IID local"]
-        CN["Cliente N-1\nPartição IID local"]
+flowchart TB
+    subgraph ClientLayer["Camada de Clientes Distribuídos (start/student_fl_client_grpc.py)"]
+        direction LR
+        C0["Cliente 0\nPartição IID local\n(80% treino / 20% teste)"]
+        C1["Cliente 1\nPartição IID local\n(80% treino / 20% teste)"]
+        CN["Cliente N-1\nPartição IID local\n(80% treino / 20% teste)"]
     end
 
-    subgraph Core["Servidor Coordenador gRPC (start/student_fl_server_grpc.py)"]
-        SRV["FederatedLearningServicer\n• GetGlobalModel\n• SubmitUpdate\n• _validate_update\n• FedAvg + Avaliação Global"]
+    subgraph GrpcCore["Núcleo Coordenador gRPC (start/student_fl_server_grpc.py + common_fl.py)"]
+        SRV["FederatedLearningServicer\n• GetGlobalModel(ClientHello) → GlobalModel\n• SubmitUpdate(ClientUpdate) → UpdateAck\n• _validate_update (rodada, duplicata, término)\n• _consolidate_round_if_ready (FedAvg + Avaliação)"]
+        PROTO["Contrato Protobuf (federated.proto)\nModelParameters • GlobalModel • ClientUpdate • UpdateAck"]
+        SRV --- PROTO
     end
 
-    subgraph UI["Camada de Observabilidade & Interface Web (app/)"]
-        ORC["ObservableFederatedLearningServicer\n& FederatedOrchestrator"]
-        API["FastAPI (REST + SSE /api/events)"]
-        WEB["Painel Web FedIris gRPC\nTopologia SVG • Gráficos • Heatmap • Testes"]
+    subgraph AppLayer["Camada de Orquestração, Rede Segura & API (app/)"]
+        ORC["ObservableFederatedLearningServicer\n& FederatedOrchestrator\n(telemetria, baseline manual, inferência, testes)"]
+        NET["net_utils.py\nBind exclusivo IPv4/IPv6\nSO_EXCLUSIVEADDRUSE • grpc.so_reuseport=0"]
+        API["FastAPI (app/server.py)\nREST (/api/*) • SSE (/api/events) • /api/health"]
+        ORC <--> API
+        NET -.-> ORC
+        NET -.-> API
     end
 
-    C0 <-->|"Protobuf / HTTP2"| SRV
-    C1 <-->|"Protobuf / HTTP2"| SRV
-    CN <-->|"Protobuf / HTTP2"| SRV
-    SRV -.->|"Telemetria em tempo real"| ORC
-    ORC <--> API
-    API <--> WEB
+    subgraph Frontend["Painel Web Autocontido (app/static/ + run_ui.py)"]
+        UI["FedIris gRPC Dashboard\nTopologia SVG • Gráficos • Heatmap • Validações • Inferência • Testes"]
+    end
+
+    C0 <-->|"gRPC / HTTP2 (Protobuf)"| SRV
+    C1 <-->|"gRPC / HTTP2 (Protobuf)"| SRV
+    CN <-->|"gRPC / HTTP2 (Protobuf)"| SRV
+    SRV -.->|"Herança + eventos em tempo real"| ORC
+    API <-->|"HTTP + Server-Sent Events"| UI
+```
+
+### Fluxo de Comunicação gRPC por Rodada
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Cliente gRPC (cid = k)
+    participant S as Servidor gRPC (FederatedLearningServicer)
+    participant F as Agregador FedAvg (common_fl.py)
+
+    Note over S: Rodada r = 1, pesos globais zerados
+    loop Até global_model.done == True
+        C->>S: GetGlobalModel(ClientHello{cid})
+        S-->>C: GlobalModel{round, total_rounds, done, model}
+        alt done == True
+            Note over C: Encerra laço local
+        else should_wait(round, completed_round)
+            Note over C: Aguarda poll_interval
+        else Nova rodada disponível
+            Note over C: params_from_proto → local_train(X_train, y_train)
+            C->>S: SubmitUpdate(ClientUpdate{cid, round, métricas, model})
+            S->>S: _validate_update(request)
+            alt Atualização inválida
+                S-->>C: UpdateAck{accepted=False, message}
+            else Atualização válida
+                S->>S: Armazena em received_updates[cid]
+                opt len(received_updates) == num_clients
+                    S->>F: aggregate_fedavg(updates)
+                    F-->>S: Novos parâmetros globais
+                    S->>F: evaluate_global_model(global_params, X_test_global)
+                    S->>S: Limpa buffer e incrementa current_round
+                end
+                S-->>C: UpdateAck{accepted=True, server_round}
+            end
+        end
+    end
 ```
 
 ### Contrato gRPC (`start/federated.proto`)
@@ -80,21 +126,72 @@ service FederatedLearning {
 }
 ```
 
-- **`ModelParameters`**: transporta `coef_values` (`repeated double`), `coef_shape` (`repeated int32`) e `intercept_values` (`repeated double`), garantindo reconstrução exata dos arrays NumPy entre cliente e servidor.
+- **`ModelParameters`**: transporta `coef_values` (`repeated double`), `coef_shape` (`repeated int32`) e `intercept_values` (`repeated double`), reconstruindo exatamente os arrays NumPy entre cliente e servidor.
 - **`GlobalModel`**: informa `round`, `total_rounds`, `done`, `message` e `model`.
-- **`ClientUpdate` / `UpdateAck`**: transporta `cid`, `round`, `num_examples`, `train_loss`, `train_acc` e o modelo treinado localmente, retornando a confirmação (`accepted`, `message`, `server_round`).
+- **`ClientUpdate` / `UpdateAck`**: envia `cid`, `round`, `num_examples`, `train_loss`, `train_acc` e os pesos treinados localmente, recebendo confirmação (`accepted`, `message`, `server_round`).
 
 ---
 
-## Interface Web Interativa (`FedIris gRPC`)
+## Telas do Sistema (Interface Web `FedIris gRPC`)
 
-A interface web foi construída de forma autocontida (HTML5, CSS3, JavaScript puro e gráficos/topologia em SVG — sem dependências de CDN, funcionando inclusive offline) e está organizada em **5 abas**:
+A interface web é totalmente autocontida (HTML5, CSS3, JavaScript puro e visualizações em SVG — sem dependências externas de CDN, funcionando inclusive offline) e acompanha execuções reais sobre canais gRPC em **5 telas**:
 
-1. **Visão Geral & Topologia:** configuração de clientes, rodadas, épocas locais, delay visual e **modo passo a passo**; linha do tempo das 6 etapas do ciclo federado; KPIs ao vivo; topologia gRPC animada com pacotes trafegando nas arestas; gráficos de **Acurácia** e **Log-Loss** comparáveis em tempo real com a **baseline manual** (`fl_sim_manual.py`).
-2. **Clientes, Partições & Pesos:** visualização da distribuição IID das 3 espécies do Iris por cliente, peso relativo no FedAvg, **heatmap interativo** da matriz `coef_` e `intercept_` com seletor histórico por rodada e **matriz de confusão 3×3** no conjunto de teste global.
-3. **Protocolo gRPC & Validações:** laboratório ao vivo para injetar RPCs inválidos reais (`rodada inválida`, `atualização duplicada` e `envio pós-encerramento`) contra o servidor ativo + tabela filtrável de todo o tráfego Protobuf (bytes, latência em ms e status).
-4. **Testar Modelo (Iris):** laboratório de inferência com sliders e presets (Setosa, Versicolor, Virginica) consultando o modelo global agregado atual em tempo real.
-5. **Testes Unitários:** executa os 5 módulos oficiais de `start/tests/` e exibe o status detalhado de cada caso de teste.
+### 1. Visão Geral & Topologia
+![Tela 1 — Visão Geral e Topologia gRPC](docs/screenshots/01_visao_geral_topologia.png)
+
+Painel principal de controle e monitoramento da federação:
+- **Barra de configuração:** permite definir número de clientes ($N$), total de rodadas ($R$), épocas locais, *delay* visual e ativar o **modo passo a passo** (ideal para demonstrações didáticas rodada a rodada), além de disparar a **baseline manual** (`fl_sim_manual.py`) para comparação direta.
+- **Ciclo de Aprendizagem Federada (Etapas 0 a 5):** destaca em tempo real em qual fase do protocolo o sistema se encontra.
+- **KPIs em tempo real:** exibe a rodada atual, a **Acurácia Global** no conjunto de teste (chegando a **100%**), a **Log-Loss Global** e o volume total de **RPCs e bytes Protobuf** trafegados (incluindo atualizações aceitas e recusadas).
+- **Topologia gRPC em SVG + Gráficos de Convergência:** mostra o servidor central cercado pelos $N$ clientes conectados via gRPC (com pacotes animados trafegando nas arestas durante a execução) e gráficos comparativos de **Acurácia** e **Log-Loss** entre o modelo global agregado, a média do treino local e a linha tracejada da baseline manual.
+
+---
+
+### 2. Clientes, Partições & Pesos
+![Tela 2 — Clientes, Partições IID, Heatmap de Pesos e Matriz de Confusão](docs/screenshots/02_clientes_particoes_pesos.png)
+
+Visão interna dos dados distribuídos e dos parâmetros aprendidos pelo modelo global:
+- **Partições IID por Cliente:** exibe para cada cliente a proporção local das 3 espécies do dataset Iris (*Setosa*, *Versicolor*, *Virginica*), a divisão 80% treino / 20% teste, o **peso relativo no FedAvg** ($n_k / n$) e as métricas locais da última rodada — evidenciando que os dados brutos permanecem em cada cliente.
+- **Heatmap Interativo de Parâmetros (`coef_` e `intercept_`):** permite inspecionar a matriz $3 \times 4$ de pesos e o vetor de interceptos da regressão logística, com um seletor de rodada para acompanhar a evolução desde a Rodada 0 (zerada) até a convergência, exibindo também a norma $L_2$ global e o $\Delta$ entre rodadas.
+- **Matriz de Confusão Global:** avalia o modelo agregado mais recente sobre a união dos conjuntos de teste locais dos clientes.
+
+---
+
+### 3. Protocolo gRPC & Validações
+![Tela 3 — Laboratório de Validações e Fluxo de Chamadas RPC](docs/screenshots/03_protocolo_grpc_validacoes.png)
+
+Ferramenta de inspeção de rede e validação das regras de segurança implementadas em `_validate_update`:
+- **Laboratório de Validações:** botões para disparar chamadas `SubmitUpdate` reais contra o servidor gRPC ativo simulando **rodada inválida (`round=99`)**, **atualização duplicada (`cid=0`)** e **envio pós-encerramento**, exibindo a resposta exata `UpdateAck` (`accepted`, `server_round`, `message`).
+- **Fluxo de Chamadas RPC em Tempo Real:** tabela filtrável (`Todos`, `GetGlobalModel`, `SubmitUpdate`, `Recusados`) registrando cada chamada Protobuf com horário, cliente, rodada, tamanho do payload (requisição/resposta em bytes), latência em milissegundos, status (`OK`, `DONE`, `RECUSADO`) e mensagem retornada pelo servidor.
+
+---
+
+### 4. Testar Modelo (Iris)
+![Tela 4 — Laboratório de Inferência no Modelo Global Iris](docs/screenshots/04_testar_modelo_iris.png)
+
+Laboratório interativo de inferência diretamente sobre o modelo global federado atual:
+- **Sliders e Presets:** permite ajustar livremente os 4 atributos numéricos (`petal_length`, `petal_width`, `sepal_length`, `sepal_width`) ou carregar perfis típicos de *Setosa*, *Versicolor* e *Virginica*.
+- **Predição ao Vivo:** exibe a espécie prevista, o nível de confiança e a distribuição de probabilidades (`predict_proba`) das 3 classes usando os pesos consolidados da rodada mais recente — possibilitando observar o modelo evoluir de ~33% uniforme na Rodada 0 até classificações confiantes após o treino federado.
+
+---
+
+### 5. Testes Unitários
+![Tela 5 — Executor da Suíte Oficial de Testes Unitários](docs/screenshots/05_testes_unitarios.png)
+
+Integração direta com a suíte oficial de validação do trabalho (`start/tests/`):
+- Executa todos os **5 módulos de teste** na ordem pedagógica recomendada pelo roteiro da disciplina (`test_01` → `test_03` → `test_04` → `test_05` → `test_02`).
+- Exibe o resumo geral de aprovação (**15/15 testes passando**), a duração por módulo e o status individual de cada caso de teste.
+
+---
+
+## Proteção contra Colisão de Portas
+
+Para evitar que outro serviço na mesma máquina intercepte o painel web ou o servidor gRPC (cenário comum no Windows com `SO_REUSEADDR` ou conflitos IPv4/IPv6):
+
+- **Bind exclusivo sem *race condition* (`app/net_utils.py`):** testa disponibilidade em **IPv4 (`127.0.0.1`) e IPv6 (`::1`)** com `SO_EXCLUSIVEADDRUSE` e entrega o socket já reservado diretamente ao Uvicorn.
+- **Verificação de identidade (`/api/health`):** o launcher `run_ui.py` gera um `instance_id` único e **só abre o navegador** após confirmar que `GET /api/health` responde com `app == "fediris-grpc"` e o mesmo `instance_id` — impedindo abrir outro sistema por engano.
+- **Modo estrito opcional (`--strict-port`):** permite escolher entre migrar automaticamente para a próxima porta livre ou abortar com erro explícito.
+- **Proteção no gRPC (`grpc.so_reuseport=0`):** desativa compartilhamento silencioso de porta e valida `bound_port != 0` tanto no orquestrador quanto no `student_fl_server_grpc.py`, além de diagnosticar `StatusCode.UNIMPLEMENTED` no cliente caso outro servidor gRPC ocupe a porta.
 
 ---
 
@@ -102,11 +199,13 @@ A interface web foi construída de forma autocontida (HTML5, CSS3, JavaScript pu
 
 ```text
 .
-├── pyproject.toml                  # Metadados do projeto, dependências e config Pyright
-├── run_ui.py                       # Launcher único da interface web (com fallback de porta livre)
+├── pyproject.toml                  # Metadados, dependências e configuração Pyright
+├── run_ui.py                       # Launcher único da interface web (bind exclusivo + /api/health)
 ├── fl_sim_manual.py                # Simulação manual em memória (referência didática)
 ├── README.md                       # Documentação do projeto
 ├── .gitignore                      # Arquivos ignorados pelo Git
+├── docs/
+│   └── screenshots/                # Capturas das 5 telas do painel web
 ├── start/                          # Núcleo oficial do Trabalho 1 (compatível com avaliação)
 │   ├── federated.proto             # Definição do serviço e mensagens gRPC/Protobuf
 │   ├── federated_pb2.py            # Stubs de mensagens gerados via grpc_tools.protoc
@@ -123,9 +222,10 @@ A interface web foi construída de forma autocontida (HTML5, CSS3, JavaScript pu
 │       ├── test_04_server_validation.py
 │       ├── test_05_server_submit_and_consolidate.py
 │       └── utils.py
-└── app/                            # Orquestração gRPC observável e painel web
+└── app/                            # Orquestração gRPC observável, rede segura e painel web
+    ├── net_utils.py                # Detecção IPv4/IPv6 e bind exclusivo de sockets
     ├── orchestrator.py             # Gerenciador de sessões gRPC, telemetria, inferência e testes
-    ├── server.py                   # API FastAPI (REST + SSE)
+    ├── server.py                   # API FastAPI (REST + SSE + /api/health)
     └── static/                     # Frontend web autocontido
         ├── index.html
         ├── styles.css
@@ -162,7 +262,7 @@ pip install flwr-datasets numpy pandas scikit-learn grpcio grpcio-tools fastapi 
 ```
 
 ### 2. (Opcional) Regerar os stubs Protobuf
-Os arquivos `federated_pb2.py`, `federated_pb2.pyi` e `federated_pb2_grpc.py` já estão incluídos em `start/`. Caso altere `start/federated.proto`, regere-os executando dentro de `start/`:
+Os arquivos `federated_pb2.py`, `federated_pb2.pyi` e `federated_pb2_grpc.py` já estão versionados em `start/`. Caso altere `start/federated.proto`, regere-os executando dentro de `start/`:
 
 ```bash
 python -m grpc_tools.protoc -I. --python_out=. --pyi_out=. --grpc_python_out=. federated.proto
@@ -177,7 +277,7 @@ Na raiz do projeto:
 ```bash
 python run_ui.py
 ```
-O servidor sobe em `http://127.0.0.1:8000` (ou seleciona automaticamente a próxima porta livre caso a 8000 esteja ocupada) e abre o painel no navegador.
+O servidor inicia em `http://127.0.0.1:8000` (ou seleciona automaticamente a próxima porta livre exclusiva caso a 8000 esteja ocupada; use `--strict-port` para exigir a porta especificada) e abre o painel no navegador somente após validar `/api/health`.
 
 ### Opção 2 — Execução Distribuída via CLI (Múltiplos Terminais)
 

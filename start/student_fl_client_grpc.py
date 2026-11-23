@@ -113,6 +113,12 @@ def run_client(cid: int, server_address: str, num_clients: int, poll_interval: f
                 global_model = stub.GetGlobalModel(federated_pb2.ClientHello(cid=cid))
                 startup_retries = 0
             except grpc.RpcError as exc:
+                if exc.code() == grpc.StatusCode.UNIMPLEMENTED:
+                    print(
+                        f"[Cliente {cid}] O serviço em {server_address} não implementa FederatedLearning "
+                        "(outro sistema pode estar usando esta porta). Encerrando cliente."
+                    )
+                    break
                 if exc.code() == grpc.StatusCode.UNAVAILABLE:
                     if completed_round == 0 and startup_retries < max_startup_retries:
                         startup_retries += 1

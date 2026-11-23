@@ -76,21 +76,22 @@
   // ------------------------------------------------------------------
   // Tabs
   // ------------------------------------------------------------------
-  $$(".tab").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const target = btn.dataset.tab;
-      $$(".tab").forEach((b) => {
-        const active = b.dataset.tab === target;
-        b.classList.toggle("active", active);
-        b.setAttribute("aria-selected", String(active));
-      });
-      $$(".tab-panel").forEach((p) => {
-        p.classList.toggle("active", p.id === `tab-${target}`);
-      });
-      if (target === "inference") {
-        runPredict();
-      }
+  function activateTab(target) {
+    $$(".tab").forEach((b) => {
+      const active = b.dataset.tab === target;
+      b.classList.toggle("active", active);
+      b.setAttribute("aria-selected", String(active));
     });
+    $$(".tab-panel").forEach((p) => {
+      p.classList.toggle("active", p.id === `tab-${target}`);
+    });
+    if (target === "inference") {
+      runPredict();
+    }
+  }
+
+  $$(".tab").forEach((btn) => {
+    btn.addEventListener("click", () => activateTab(btn.dataset.tab));
   });
 
   // ------------------------------------------------------------------
@@ -389,6 +390,18 @@
 
     if (snap.last_test_results) {
       renderTestResults(snap.last_test_results);
+    }
+
+    if (snap.last_inject_result) {
+      const res = snap.last_inject_result;
+      const box = $("#inject-result");
+      box.classList.remove("hidden");
+      box.innerHTML = `
+        <strong>Resposta gRPC (UpdateAck)</strong> —
+        accepted=<span style="color:${res.accepted ? "#059669" : "#dc2626"}">${res.accepted}</span> |
+        server_round=${res.server_round} |
+        message="${escapeHtml(res.message)}"
+      `;
     }
 
     if (snap.rounds_history.length !== prevRoundsLen && $("#tab-inference").classList.contains("active")) {
@@ -989,7 +1002,28 @@
   async function init() {
     renderTopology();
     renderCharts();
-    connectSSE();
+
+    const params = new URLSearchParams(window.location.search);
+    const presetName = params.get("preset");
+    if (presetName && PRESETS[presetName]) {
+      const p = PRESETS[presetName];
+      $("#in-pl").value = p.pl;
+      $("#in-pw").value = p.pw;
+      $("#in-sl").value = p.sl;
+      $("#in-sw").value = p.sw;
+      sliders.forEach(({ id, out }) => {
+        $(`#${out}`).textContent = `${Number($(`#${id}`).value).toFixed(1)} cm`;
+      });
+    }
+
+    const initialTab = params.get("tab");
+    if (initialTab && $(`#tab-${initialTab}`)) {
+      activateTab(initialTab);
+    }
+
+    if (params.get("sse") !== "0") {
+      connectSSE();
+    }
     try {
       const resp = await fetch("/api/state");
       if (resp.ok) {
@@ -997,6 +1031,10 @@
       }
     } catch (err) {
       console.error(err);
+    }
+
+    if (initialTab === "inference") {
+      await runPredict();
     }
   }
 

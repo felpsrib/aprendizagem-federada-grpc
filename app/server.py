@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import queue
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
@@ -15,6 +16,8 @@ from pydantic import BaseModel, Field
 from app.orchestrator import FederatedOrchestrator, SessionConfig
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+APP_IDENTIFIER = "fediris-grpc"
+INSTANCE_ID = uuid.uuid4().hex
 
 orchestrator = FederatedOrchestrator()
 
@@ -65,6 +68,15 @@ class PredictRequest(BaseModel):
 @app.get("/")
 def serve_index():
     return FileResponse(str(STATIC_DIR / "index.html"))
+
+
+@app.get("/api/health")
+def health_check():
+    return {
+        "app": APP_IDENTIFIER,
+        "instance_id": INSTANCE_ID,
+        "status": "ok",
+    }
 
 
 @app.get("/api/state")

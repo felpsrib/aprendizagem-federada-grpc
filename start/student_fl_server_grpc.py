@@ -1,4 +1,6 @@
 import argparse
+import socket
+import sys
 import threading
 from concurrent import futures
 
@@ -185,15 +187,68 @@ class FederatedLearningServicer(federated_pb2_grpc.FederatedLearningServicer):
 
 
 
+def _is_port_in_use(host: str, port: int) -> bool:
+    ipv4_target = "127.0.0.1" if host in ("0.0.0.0", "localhost", "") else host
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.settimeout(0.15)
+            if probe.connect_ex((ipv4_target, port)) == 0:
+                return True
+    except OSError:
+        pass
+    if host in ("127.0.0.1", "localhost", "0.0.0.0", "") and socket.has_ipv6:
+        try:
+            with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as probe6:
+                probe6.settimeout(0.15)
+                if probe6.connect_ex(("::1", port)) == 0:
+                    return True
+        except OSError:
+            pass
+        try:
+            with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as sock6:
+                if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+                    sock6.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+                sock6.bind(("::1", port))
+        except OSError as exc:
+            if exc.errno not in (10049, 10047, 99, 97):
+                return True
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            sock.bind((host, port))
+    except OSError:
+        return True
+    return False
+
+
 def serve(host: str, port: int, num_clients: int, total_rounds: int):
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
+    if _is_port_in_use(host, port):
+        print(
+            f"[Erro] A porta {port} em {host} já está em uso por outro processo. "
+            f"Escolha outra porta com --port (ex.: --port {port + 1}).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    server = grpc.server(
+        futures.ThreadPoolExecutor(max_workers=10),
+        options=[("grpc.so_reuseport", 0)],
+    )
     servicer = FederatedLearningServicer(num_clients, total_rounds)
     federated_pb2_grpc.add_FederatedLearningServicer_to_server(servicer, server)
 
     address = f"{host}:{port}"
-    server.add_insecure_port(address)
+    bound_port = server.add_insecure_port(address)
+    if bound_port == 0:
+        print(
+            f"[Erro] Falha ao vincular o servidor gRPC em {address} (porta possivelmente ocupada).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     server.start()
-    print(f"Servidor gRPC ouvindo em {address}")
+    print(f"Servidor gRPC ouvindo em {host}:{bound_port}")
     print(f"Aguardando {num_clients} clientes por rodada, total de {total_rounds} rodadas.\n")
 
     # Dica:

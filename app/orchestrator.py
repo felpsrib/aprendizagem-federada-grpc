@@ -24,6 +24,8 @@ if _HF_IRIS_CACHE.exists():
 import grpc
 import numpy as np
 
+from app.net_utils import find_free_port as _find_free_port_safe
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 START_DIR = PROJECT_ROOT / "start"
 
@@ -67,14 +69,7 @@ def format_species_label(raw_label: Any) -> str:
 
 
 def find_free_port(preferred: int = 50051) -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            sock.bind(("127.0.0.1", preferred))
-            return preferred
-        except OSError:
-            sock.bind(("127.0.0.1", 0))
-            return int(sock.getsockname()[1])
+    return _find_free_port_safe(host="127.0.0.1", preferred=preferred)
 
 
 def compute_confusion_matrix(
@@ -288,6 +283,7 @@ class FederatedOrchestrator:
         }
         self.manual_baseline: Optional[Dict[str, Any]] = None
         self.last_test_results: Optional[Dict[str, Any]] = None
+        self.last_inject_result: Optional[Dict[str, Any]] = None
 
         # Cache do modelo mais recente para inferência mesmo após parar a sessão
         self._model_template: Optional[Any] = None
@@ -350,6 +346,7 @@ class FederatedOrchestrator:
                 "manual_baseline": self.manual_baseline,
                 "has_model": self._model_template is not None and self._latest_global_params is not None,
                 "last_test_results": self.last_test_results,
+                "last_inject_result": self.last_inject_result,
             }
 
     # ------------------------------------------------------------------
@@ -445,9 +442,19 @@ class FederatedOrchestrator:
                 total_rounds=config.total_rounds,
                 orchestrator=self,
             )
-            grpc_server = grpc.server(futures.ThreadPoolExecutor(max_workers=max(10, config.num_clients + 4)))
+            grpc_server = grpc.server(
+                futures.ThreadPoolExecutor(max_workers=max(10, config.num_clients + 4)),
+                options=[("grpc.so_reuseport", 0)],
+            )
             federated_pb2_grpc.add_FederatedLearningServicer_to_server(servicer, grpc_server)
-            grpc_server.add_insecure_port(address)
+            bound_port = grpc_server.add_insecure_port(address)
+            if bound_port == 0:
+                # Se a porta acabou de ser ocupada por outro processo, solicita porta efêmera ao SO
+                bound_port = grpc_server.add_insecure_port("127.0.0.1:0")
+            if bound_port == 0:
+                raise RuntimeError(f"Não foi possível iniciar o servidor gRPC em {address} nem em porta alternativa.")
+            port = bound_port
+            address = f"127.0.0.1:{port}"
             grpc_server.start()
 
             init_loss, init_acc = common_fl.evaluate_global_model(
@@ -864,12 +871,15 @@ class FederatedOrchestrator:
                 model=proto_model,
             )
             ack = stub.SubmitUpdate(req)
-            return {
+            result = {
                 "kind": kind,
                 "accepted": bool(ack.accepted),
                 "message": ack.message,
                 "server_round": int(ack.server_round),
             }
+            with self._state_lock:
+                self.last_inject_result = result
+            return result
 
     # ------------------------------------------------------------------
     # Baseline Manual (equivalente ao fl_sim_manual.py)
